@@ -30,6 +30,7 @@ import (
     "bytes"
     "errors"
     "io"
+    "os"
     "os/exec"
     "strconv"
     "strings"
@@ -69,6 +70,22 @@ func ConvertWithAspect(data io.Reader, maxRes int, format string) (io.Reader, er
 
     out, err := Convert(data, w, h, format)
     return out, err
+}
+
+func ConvertFileWithAspect(src string, dest string, maxRes int, format string) error {
+    in, err := os.Open(src)
+    if err != nil { return err }
+
+    out, err := ConvertWithAspect(in, maxRes, format)
+    if err != nil { return err }
+
+    file, err := os.Create(dest)
+    if err != nil { return err }
+
+    _, err = io.Copy(file, out)
+    if err != nil { return err }
+
+    return nil
 }
 
 // Convert takes a reader (image) as input, returning a reader of the converted
@@ -134,6 +151,22 @@ func Convert(data io.Reader, w int, h int, format string) (io.Reader, error) {
     cmd.Start()
 
     return stdout, err
+}
+
+func ConvertFile(src string, dest string, w int, h int, format string) error {
+    in, err := os.Open(src)
+    if err != nil { return err }
+
+    out, err := Convert(in, w, h, format)
+    if err != nil { return err }
+
+    file, err := os.Create(dest)
+    if err != nil { return err }
+
+    _, err = io.Copy(file, out)
+    if err != nil { return err }
+
+    return nil
 }
 
 // Takes image dimensions as input, returning those dimensions scaled while
@@ -212,6 +245,7 @@ func GetRes(data io.Reader) (int, int, error) {
         return w, h, nil
     }
 
+    err = errors.New("Failed to get size information from image")
     return 0, 0, err
 }
 
