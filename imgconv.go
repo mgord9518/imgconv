@@ -1,6 +1,6 @@
 // Copyright © 2021 Mathew Gordon <github.com/mgord9518>
 //
-// Permission  is hereby  granted,  free of charge,  to any person  obtaining a 
+// Permission  is hereby  granted,  free of charge,  to any person  obtaining a
 // copy of this software  and associated documentation files  (the “Software”),
 // to   deal   in   the  Software   without  restriction,   including   without
 // limitation the rights  to use, copy, modify, merge,   publish,   distribute,
@@ -40,26 +40,6 @@ import (
 
 var (
     err error
-
-    // What each conversion program supports as input
-    sprtIn = map[string][]string{
-        "convert": {
-            "png", "svg",
-        },
-        "rsvg-convert": {
-            "svg",
-        },
-    }
-
-    // And output
-    sprtOut = map[string][]string{
-        "convert": {
-            "png",
-        },
-        "rsvg-convert": {
-            "png",
-        },
-    }
 )
 
 func ConvertWithAspect(data io.Reader, maxRes int, format string) (io.Reader, error) {
@@ -83,7 +63,11 @@ func ConvertFileWithAspect(src string, dest string, maxRes int, format string) e
     if err != nil { return err }
 
     _, err = io.Copy(file, out)
-    if err != nil { return err }
+    file.Close()
+    if err != nil {
+        os.Remove(dest)
+        return err
+    }
 
     return nil
 }
@@ -95,48 +79,19 @@ func Convert(data io.Reader, w int, h int, format string) (io.Reader, error) {
     var convCmd    string
     var convArgs []string
 
-    if !contains(sprtOut["convert"], format) {
-        err := errors.New("Unsupported export format: "+format)
-        return data, err
-    }
 
-    // Create a filename for our PNG icon
-    if convCmd, err = exec.LookPath("rsvg-convert"); err == nil {
-        convCmd  = "rsvg-convert"
-        convArgs = []string{
-            "-w", strconv.Itoa(w),
-            "-h", strconv.Itoa(h),
-        }
-    } else if convCmd, err = exec.LookPath("inkscape"); err == nil {
-        convCmd  = "inkscape"
-        convArgs = []string{
-            "-p",
-            "--export-type="+format,
-            "-w", strconv.Itoa(w),
-            "-h", strconv.Itoa(h),
-            "-o", "-",
-        }
-    } else if convCmd, err = exec.LookPath("convert"); err == nil {
-        res := strconv.Itoa(w)+"x"+strconv.Itoa(h)
+    // Get original width and height
+    var data2 io.Reader
+    data2, data = splitStream(data)
+    ow, oh, _ := GetRes(data2)
 
-        // ImageMagick requires DPI, so we have to calculate it. If not
-        // specified, ImageMagick will create a blurry image from many SVGs
-        var data2 io.Reader
-        data2, data = splitStream(data)
-        ow, oh, _ := GetRes(data2)
-        dpi := calcDpi(ow, oh, w, h)
+    // Find a program capable of exporting the specified format
+    convCmd, convArgs, err := getCmd("svg", "png", ow, oh, w, h)
+    if err != nil { return data, err }
 
-        convArgs = []string{
-            "-background", "none",
-            "-density",    strconv.Itoa(dpi),
-            "-resize",     res,
-            "-",
-            format+":-",
-        }
-    } else {
-        err = errors.New("Failed to find supported image conversion software on this machine")
-        return data, err
-    }
+    // Unset LD_LIBRARY_PATH before running command in case running inside an AppImage
+    libPath, present := os.LookupEnv("LD_LIBRARY_PATH")
+    os.Unsetenv("LD_LIBRARY_PATH")
 
     cmd := exec.Command(convCmd, convArgs...)
     stdin, err := cmd.StdinPipe()
@@ -150,7 +105,91 @@ func Convert(data io.Reader, w int, h int, format string) (io.Reader, error) {
 
     cmd.Start()
 
+    // Set LD_LIBRARY_PATH back to its original value
+    if present {
+        os.Setenv("LD_LIBRARY_PATH", libPath)
+    }
+
     return stdout, err
+}
+
+func getCmd(formatIn string, formatOut string, ow int, oh int, w int, h int) (string, []string, error) {
+    var cmd    string
+    var args []string
+
+    // Sort programs by speed, convert is the slowest but has the widest
+    // format support
+    pref := []string{
+        "rsvg-convert",
+        "inkscape",
+        "convert",
+    }
+
+    res := strconv.Itoa(w)+"x"+strconv.Itoa(h)
+    dpi := calcDpi(ow, oh, w, h)
+
+    progs := map[string][]string{
+        "convert": {
+            "-background", "none",
+            "-density",    strconv.Itoa(dpi),
+            "-resize",     res,
+            "-",
+            formatOut+":-",
+        },
+
+        "rsvg-convert": {
+            "-w", strconv.Itoa(w),
+            "-h", strconv.Itoa(h),
+        },
+
+        "inkscape": {
+            "-p",
+            "--export-type="+formatOut,
+            "-w", strconv.Itoa(w),
+            "-h", strconv.Itoa(h),
+            "-o", "-",
+        },
+    }
+
+    sprtIn := map[string][]string{
+        "convert": {
+            "png", "svg",
+        },
+        "rsvg-convert": {
+            "svg",
+        },
+        "inkscape": {
+            "svg",
+        },
+    }
+
+    // And output
+    sprtOut := map[string][]string{
+        "convert": {
+            "png",
+        },
+        "rsvg-convert": {
+            "png",
+        },
+        "inkscape": {
+            "png",
+        },
+    }
+
+    for _, i := range pref {
+        if cmd, err = exec.LookPath(i); err == nil &&
+        contains(sprtIn[i], formatIn) && contains(sprtOut[i], formatOut) {
+            //cmd  = i
+            args = progs[i]
+            return cmd, args, nil
+        } else {
+            continue
+        }
+    }
+
+    err := errors.New("Failed to find a suitable image conversion program on "+
+                      "this machine to convert "+formatIn+" to "+formatOut)
+    return "", []string{}, err
 }
 
 func ConvertFile(src string, dest string, w int, h int, format string) error {
@@ -164,7 +203,11 @@ func ConvertFile(src string, dest string, w int, h int, format string) error {
     if err != nil { return err }
 
     _, err = io.Copy(file, out)
-    if err != nil { return err }
+    file.Close()
+    if err != nil {
+        os.Remove(dest)
+        return err
+    }
 
     return nil
 }
