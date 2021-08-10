@@ -44,7 +44,7 @@ var (
 
 func ConvertWithAspect(data io.Reader, maxRes int, format string) (io.Reader, error) {
     data1, data := splitStream(data)
-    w, h, err := GetRes(data1)
+    w, h, err := getRes(data1)
     if err != nil { return nil, err }
     w, h = scaleWithAspect(10, 10, maxRes)
 
@@ -79,24 +79,29 @@ func Convert(data io.Reader, w int, h int, format string) (io.Reader, error) {
     var convCmd    string
     var convArgs []string
 
+    // Resolution cannot be 0 or less than -1, so return
+    if w == 0 || h == 0 || w < -1 || h < -1 {
+        err := errors.New("Invalid resolution; must either be -1 (native resolution) or above 0")
+        return data, err
+    }
 
     // Get original width and height
     var data2 io.Reader
     data2, data = splitStream(data)
-    ow, oh, _ := GetRes(data2)
+    ow, oh, err := getRes(data2)
+    //if err != nil { return nil, err }
 
-    // Find a program capable of exporting the specified format
-    convCmd, convArgs, err := getCmd("svg", "png", ow, oh, w, h)
+    // Find a program capable of converting exporting the specified format
+    convCmd, convArgs, err = getCmd("svg", format, ow, oh, w, h)
     if err != nil { return data, err }
 
     // Unset LD_LIBRARY_PATH before running command in case running inside an AppImage
-    libPath, present := os.LookupEnv("LD_LIBRARY_PATH")
     os.Unsetenv("LD_LIBRARY_PATH")
 
     cmd := exec.Command(convCmd, convArgs...)
-    stdin, err := cmd.StdinPipe()
-    stdout, err := cmd.StdoutPipe()
-    if err != nil { return nil, err }
+    stdin, _  := cmd.StdinPipe()
+    stdout, _ := cmd.StdoutPipe()
+    stderr, _ := cmd.StderrPipe()
 
     go func() {
         defer stdin.Close()
@@ -105,9 +110,14 @@ func Convert(data io.Reader, w int, h int, format string) (io.Reader, error) {
 
     cmd.Start()
 
-    // Set LD_LIBRARY_PATH back to its original value
-    if present {
-        os.Setenv("LD_LIBRARY_PATH", libPath)
+    // Return stderr if anything goes wrong
+    // FIXME: Can't find a way to get Inkscape to shut up, there seems to be no
+    // quiet mode, so using Inkscape will always return an error, even if
+    // successful
+    b := new(bytes.Buffer)
+    b.ReadFrom(stderr)
+    if b.String() != "" {
+        err = errors.New(b.String())
     }
 
     return stdout, err
@@ -145,15 +155,22 @@ func getCmd(formatIn string, formatOut string, ow int, oh int, w int, h int) (st
         "inkscape": {
             "-p",
             "--export-type="+formatOut,
-            "-w", strconv.Itoa(w),
-            "-h", strconv.Itoa(h),
-            "-o", "-",
+            "--export-filename", "-",
         },
     }
 
-    sprtIn := map[string][]string{
+    // Inkscape doesn't have support for using -1 as regular resolution, so add
+    // in width and height if the resolution asked for is 0 or greater
+    if w >= 0 && h >=0 {
+        progs["inkscape"] = append(progs["inkscape"], []string{
+            "-w", strconv.Itoa(w),
+            "-h", strconv.Itoa(h),
+        }...)
+    }
+
+    fmtIn := map[string][]string{
         "convert": {
-            "png", "svg",
+            "svg",
         },
         "rsvg-convert": {
             "svg",
@@ -164,7 +181,7 @@ func getCmd(formatIn string, formatOut string, ow int, oh int, w int, h int) (st
     }
 
     // And output
-    sprtOut := map[string][]string{
+    fmtOut := map[string][]string{
         "convert": {
             "png",
         },
@@ -178,8 +195,7 @@ func getCmd(formatIn string, formatOut string, ow int, oh int, w int, h int) (st
 
     for _, i := range pref {
         if cmd, err = exec.LookPath(i); err == nil &&
-        contains(sprtIn[i], formatIn) && contains(sprtOut[i], formatOut) {
-            //cmd  = i
+        contains(fmtIn[i], formatIn) && contains(fmtOut[i], formatOut) {
             args = progs[i]
             return cmd, args, nil
         } else {
@@ -239,6 +255,12 @@ func calcDpi(w1 int, h1 int, w2 int, h2 int) int {
         var maxRes int
         dpi := 96
 
+        // Return default DPI if less than or equal to zero, otherwise the
+        // program crashes from trying to divide by zero
+        if w1 <= 0 || w2 <= 0 || h1 <=0 || h2 <= 0 {
+            return dpi
+        }
+
         if w1 > h2 {
             maxRes = w1
         } else {
@@ -257,9 +279,9 @@ func calcDpi(w1 int, h1 int, w2 int, h2 int) int {
         return dpi
 }
 
-// GetRes takes a datastream as input, returning the size of said image.
+// getRes takes a datastream as input, returning the size of said image.
 // Like the rest of this library, it also only supports SVGs
-func GetRes(data io.Reader) (int, int, error) {
+func getRes(data io.Reader) (int, int, error) {
     // Load the SVG
     svg, err := svg.ParseSvgFromReader(data, "", 1)
     if err != nil { return 0, 0, err }
