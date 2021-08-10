@@ -45,7 +45,7 @@ var (
 func ConvertWithAspect(data io.Reader, maxRes int, format string) (io.Reader, error) {
     data1, data := splitStream(data)
     w, h, err := getRes(data1)
-    if err != nil { return nil, err }
+    if err != nil { return data, err }
     w, h = scaleWithAspect(10, 10, maxRes)
 
     out, err := Convert(data, w, h, format)
@@ -89,7 +89,7 @@ func Convert(data io.Reader, w int, h int, format string) (io.Reader, error) {
     var data2 io.Reader
     data2, data = splitStream(data)
     ow, oh, err := getRes(data2)
-    //if err != nil { return nil, err }
+    if err != nil { return data, err }
 
     // Find a program capable of converting exporting the specified format
     convCmd, convArgs, err = getCmd("svg", format, ow, oh, w, h)
