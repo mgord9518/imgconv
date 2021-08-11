@@ -1,7 +1,7 @@
 # imgconv
 A GoLang library for converting images using existing software on the user's machine.
 
-As of now only supports png to svg, but I have plans to support all image types in the supported programs (currently ImageMagick, Inkscape and rsvg-convert)
+As of now only supports png to svg, but I have plans to support all image types in the supported programs (currently ImageMagick, Inkscape and rsvg-convert).
 
 ## API:
 ### Convert
@@ -20,10 +20,10 @@ func ConvertWithAspect(data io.Reader, maxRes int, format string) (io.Reader, er
 ```
 ConvertFile(src string, dest string, w int, h int, format string) error {
 ```
-ConvertFile takes a filepath, destination filepath, width, height and destination image format as input, returning a filepath of the converted image
+ConvertFile takes a filepath, destination filepath, width, height and destination image format as input, returning a filepath of the converted image. If not successful, the file remains unchanged and no file will be supplied at 'dest'.
 
 ### ConvertFileWithAspect
 ```
 func ConvertFileWithAspect(src string, dest string, maxRes int, format string) error {
 ```
-ConvertFileWithAspect is a combination of ConvertWithAspect and ConvertFile
+ConvertFileWithAspect is a combination of ConvertWithAspect and ConvertFile.
