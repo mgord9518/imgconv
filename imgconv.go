@@ -45,10 +45,10 @@ var (
 func ConvertWithAspect(data io.Reader, maxRes int, format string) (io.Reader, error) {
     buf := &bytes.Buffer{}
     tee := io.TeeReader(data, buf)
+    n := io.MultiReader(buf, data)
 
     // Regardless of how much data 'getRes' reads from the orginial stream
     // it'll be repaired
-    n := io.MultiReader(buf, data)
 
     w, h, err := getRes(tee)
     if err != nil { return n, err }
@@ -112,7 +112,7 @@ func Convert(data io.Reader, w int, h int, format string) (io.Reader, error) {
 
     go func() {
         defer stdin.Close()
-        io.Copy(stdin, data)
+        io.Copy(stdin, n)
     }()
 
     cmd.Start()
@@ -291,7 +291,7 @@ func calcDpi(w1 int, h1 int, w2 int, h2 int) int {
 func getRes(data io.Reader) (int, int, error) {
     // Load the SVG
     svg, err := svg.ParseSvgFromReader(data, "", 1)
-    if err != nil { return 0, 0, err }
+    if err != nil { return -1, -1, err }
 
     w, _ := strconv.Atoi(svg.Width)
     h, _ := strconv.Atoi(svg.Height)
@@ -318,7 +318,7 @@ func getRes(data io.Reader) (int, int, error) {
     }
 
     err = errors.New("Failed to get size information from image")
-    return 0, 0, err
+    return -1, -1, err
 }
 
 func contains(slice []string, str string) bool {
