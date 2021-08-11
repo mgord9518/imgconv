@@ -43,12 +43,18 @@ var (
 )
 
 func ConvertWithAspect(data io.Reader, maxRes int, format string) (io.Reader, error) {
-    data1, data := splitStream(data)
-    w, h, err := getRes(data1)
-    if err != nil { return data, err }
+    buf := &bytes.Buffer{}
+    tee := io.TeeReader(data, buf)
+
+    // Regardless of how much data 'getRes' reads from the orginial stream
+    // it'll be repaired
+    n := io.MultiReader(buf, data)
+
+    w, h, err := getRes(tee)
+    if err != nil { return n, err }
     w, h = scaleWithAspect(10, 10, maxRes)
 
-    out, err := Convert(data, w, h, format)
+    out, err := Convert(n, w, h, format)
     return out, err
 }
 
@@ -85,15 +91,16 @@ func Convert(data io.Reader, w int, h int, format string) (io.Reader, error) {
         return data, err
     }
 
-    // Get original width and height
-    var data2 io.Reader
-    data2, data = splitStream(data)
-    ow, oh, err := getRes(data2)
-    if err != nil { return data, err }
+    buf := &bytes.Buffer{}
+    tee := io.TeeReader(data, buf)
+    n := io.MultiReader(buf, data)
+
+    ow, oh, err := getRes(tee)
+    if err != nil { return n, err }
 
     // Find a program capable of converting exporting the specified format
     convCmd, convArgs, err = getCmd("svg", format, ow, oh, w, h)
-    if err != nil { return data, err }
+    if err != nil { return n, err }
 
     // Unset LD_LIBRARY_PATH before running command in case running inside an AppImage
     os.Unsetenv("LD_LIBRARY_PATH")
@@ -320,12 +327,4 @@ func contains(slice []string, str string) bool {
     }
 
     return false
-}
-
-// Splits a datastream in two
-func splitStream(data io.Reader) (io.Reader, io.Reader) {
-    buf := &bytes.Buffer{}
-    tee := io.TeeReader(data, buf)
-
-    return tee, buf
 }
