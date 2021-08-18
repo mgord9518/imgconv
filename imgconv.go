@@ -138,8 +138,8 @@ func getCmd(formatIn string, formatOut string, ow int, oh int, w int, h int) (st
     // format support
     pref := []string{
         "rsvg-convert",
-        "inkscape",
-        "convert",
+        //"inkscape",
+        //"convert",
     }
 
     res := strconv.Itoa(w)+"x"+strconv.Itoa(h)
