@@ -24,6 +24,10 @@
 // assist in thumbnailing SVGs,  it currently only  supports svg2png conversion
 // but I plan to add support for converting between most common formats.
 
+// Currently  only  supports  Linux  (and  maybe macOS if it has ImageMagick?),
+// supporting  Windows  will  be very limited, because to my knowledge it comes
+// with no software capable of converting images on the CLI by default
+
 package imgconv
 
 import (
@@ -35,29 +39,43 @@ import (
     "strconv"
     "strings"
 
-    "github.com/rustyoz/svg"
+    svg  "github.com/rustyoz/svg"
+    mime "github.com/gabriel-vasile/mimetype"
 )
 
 var (
     err error
 )
 
+// Does the same thing as Convert, but only uses one dimension as input, it
+// keeps the aspect ratio, using the input value as the maximum width or height
+// of the final image
 func ConvertWithAspect(data io.Reader, maxRes int, format string) (io.Reader, error) {
+    var w, h int
+
+    // This monstrosity is to split the original datastream into 3. If there
+    // is a better way to do this I'm all ears
     buf := &bytes.Buffer{}
     tee := io.TeeReader(data, buf)
-    n := io.MultiReader(buf, data)
+    n2 := io.MultiReader(buf, data)
+    buf2 := &bytes.Buffer{}
+    tee2 := io.TeeReader(n2, buf2)
+    n := io.MultiReader(buf2, n2)
 
-    // Regardless of how much data 'getRes' reads from the orginial stream
-    // it'll be repaired
-
-    w, h, err := getRes(tee)
-    if err != nil { return n, err }
-    w, h = scaleWithAspect(10, 10, maxRes)
+    mimetype, err := GetType(tee)
+    if mimetype == "svg" {
+        ow, oh, err := getSvgRes(tee2)
+        if err != nil { return n, err }
+        w, h = scaleWithAspect(ow, oh, maxRes)
+    } else {
+        w, h = maxRes, maxRes
+    }
 
     out, err := Convert(n, w, h, format)
     return out, err
 }
 
+// Combination of ConvertFile and ConvertWithAspect
 func ConvertFileWithAspect(src string, dest string, maxRes int, format string) error {
     in, err := os.Open(src)
     if err != nil { return err }
@@ -82,9 +100,6 @@ func ConvertFileWithAspect(src string, dest string, maxRes int, format string) e
 // data in the format requested. If not successful, it will return the original
 // image and an error.
 func Convert(data io.Reader, w int, h int, format string) (io.Reader, error) {
-    var convCmd    string
-    var convArgs []string
-
     // Resolution cannot be 0 or less than -1, so return
     if w == 0 || h == 0 || w < -1 || h < -1 {
         err := errors.New("Invalid resolution; must either be -1 (native resolution) or above 0")
@@ -95,60 +110,59 @@ func Convert(data io.Reader, w int, h int, format string) (io.Reader, error) {
     tee := io.TeeReader(data, buf)
     n := io.MultiReader(buf, data)
 
-    ow, oh, err := getRes(tee)
+    mimetype, err := GetType(tee)
     if err != nil { return n, err }
 
     // Find a program capable of converting exporting the specified format
-    convCmd, convArgs, err = getCmd("svg", format, ow, oh, w, h)
+    convCmd, convArgs, err := getCmd(mimetype, format, w, h)
     if err != nil { return n, err }
 
     // Unset LD_LIBRARY_PATH before running command in case running inside an AppImage
     os.Unsetenv("LD_LIBRARY_PATH")
 
+    var b bytes.Buffer
+
     cmd := exec.Command(convCmd, convArgs...)
     stdin, _  := cmd.StdinPipe()
-    stdout, _ := cmd.StdoutPipe()
-    stderr, _ := cmd.StderrPipe()
+    cmd.Stderr = &b
 
     go func() {
         defer stdin.Close()
         io.Copy(stdin, n)
     }()
 
-    cmd.Start()
+    // Run the command and buffer the output
+    byteSlice, err := cmd.Output()
+    stdout := bytes.NewReader(byteSlice)
 
-    // Return stderr if anything goes wrong
-    // FIXME: Can't find a way to get Inkscape to shut up, there seems to be no
-    // quiet mode, so using Inkscape will always return an error, even if
-    // successful
-    b := new(bytes.Buffer)
-    b.ReadFrom(stderr)
-    if b.String() != "" {
+    // If the command exits non-zero status, return stderr as the error message
+    if err != nil {
         err = errors.New(b.String())
     }
 
     return stdout, err
 }
 
-func getCmd(formatIn string, formatOut string, ow int, oh int, w int, h int) (string, []string, error) {
+// getCmd attempts to find a suitable command to convert to the requested
+// format from the start format
+func getCmd(formatIn string, formatOut string, w int, h int) (string, []string, error) {
     var cmd    string
     var args []string
 
+    //TODO: Create a struct and use it instead of all these cluttered maps
     // Sort programs by speed, convert is the slowest but has the widest
     // format support
     pref := []string{
         "rsvg-convert",
-        //"inkscape",
-        //"convert",
+        "inkscape",
+        "convert",
     }
 
     res := strconv.Itoa(w)+"x"+strconv.Itoa(h)
-    dpi := calcDpi(ow, oh, w, h)
 
     progs := map[string][]string{
         "convert": {
             "-background", "none",
-            "-density",    strconv.Itoa(dpi),
             "-resize",     res,
             "-",
             formatOut+":-",
@@ -157,6 +171,7 @@ func getCmd(formatIn string, formatOut string, ow int, oh int, w int, h int) (st
         "rsvg-convert": {
             "-w", strconv.Itoa(w),
             "-h", strconv.Itoa(h),
+            "-f", formatOut,
         },
 
         "inkscape": {
@@ -168,16 +183,31 @@ func getCmd(formatIn string, formatOut string, ow int, oh int, w int, h int) (st
 
     // Inkscape doesn't have support for using -1 as regular resolution, so add
     // in width and height if the resolution asked for is 0 or greater
-    if w >= 0 && h >=0 {
+    if w > 0 && h > 0 {
         progs["inkscape"] = append(progs["inkscape"], []string{
             "-w", strconv.Itoa(w),
             "-h", strconv.Itoa(h),
         }...)
     }
 
+    // The DPI for convert is set to 3072 because it's the ideal DPI for
+    // converting a 16x16 SVG image to 512x512, which feels like a reasonable
+    // medium, especially because ImageMagick is less than ideal for converting
+    // SVGs anyway. If w and h set to -1, the density will not be changed
+    if formatIn == "svg" && w > 0 && h > 0 {
+        progs["convert"] = append([]string{
+            "-density",    "3072",
+        }, progs["convert"]...)
+    }
+
+    // Formats these programs support taking as input
+    // This is partially limited by the formats the mimetype library supports
     fmtIn := map[string][]string{
         "convert": {
-            "svg",
+            "svg", "png", "xpm", "jxl", "jp2", "jpf",
+            "jpg", "gif", "webp","bmp", "ico", "bpg",
+            "dwg", "icns","heic","heif","hdr", "xcf",
+            "pat", "gbr",
         },
         "rsvg-convert": {
             "svg",
@@ -190,16 +220,20 @@ func getCmd(formatIn string, formatOut string, ow int, oh int, w int, h int) (st
     // And output
     fmtOut := map[string][]string{
         "convert": {
-            "png",
+            "png", "xpm", "jxl", "jp2", "jpf", "gbr",
+            "jpg", "gif", "webp","bmp", "ico", "bpg",
+            "dwg", "icns","heic","heif","hdr", "xcf",
+            "pat",
         },
         "rsvg-convert": {
-            "png",
+            "png", "pdf", "ps",  "eps", "svg", "xml",
         },
         "inkscape": {
-            "png",
+            "png", "pdf", "ps",  "eps", "svg",
         },
     }
 
+    // Find a suitable command to convert from the input format to the output
     for _, i := range pref {
         if cmd, err = exec.LookPath(i); err == nil &&
         contains(fmtIn[i], formatIn) && contains(fmtOut[i], formatOut) {
@@ -215,6 +249,7 @@ func getCmd(formatIn string, formatOut string, ow int, oh int, w int, h int) (st
     return "", []string{}, err
 }
 
+// ConvertFile does the same thing as Convert, just directly to a file
 func ConvertFile(src string, dest string, w int, h int, format string) error {
     in, err := os.Open(src)
     if err != nil { return err }
@@ -257,38 +292,23 @@ func scaleWithAspect(width int, height int, maxRes int) (int, int) {
     return w, h
 }
 
-// Really just for ImageMagick currently, but possibly that other convert programs need it
-func calcDpi(w1 int, h1 int, w2 int, h2 int) int {
-        var maxRes int
-        dpi := 96
+// GetType returns the common file extension of the image presented
+func GetType(data io.Reader) (string, error) {
+    m, err := mime.DetectReader(data)
+    if err != nil { return "", err }
+    s := strings.Split(m.String(), "/")
 
-        // Return default DPI if less than or equal to zero, otherwise the
-        // program crashes from trying to divide by zero
-        if w1 <= 0 || w2 <= 0 || h1 <=0 || h2 <= 0 {
-            return dpi
-        }
-
-        if w1 > h2 {
-            maxRes = w1
-        } else {
-            maxRes = h1
-        }
-
-        n1 := w2 / maxRes
-        n2 := h2 / maxRes
-
-        if n1 < n2 {
-            dpi = n1 * 96
-        } else {
-            dpi = n2 * 96
-        }
-
-        return dpi
+    if s[0] != "image" {
+        err := errors.New("Data magic wasn't detected as an image format")
+        return "", err
+    } else {
+        return strings.Replace(m.Extension(), ".", "", 1), nil
+    }
 }
 
-// getRes takes a datastream as input, returning the size of said image.
+// getSvgRes takes a datastream as input, returning the size of said image.
 // Like the rest of this library, it also only supports SVGs
-func getRes(data io.Reader) (int, int, error) {
+func getSvgRes(data io.Reader) (int, int, error) {
     // Load the SVG
     svg, err := svg.ParseSvgFromReader(data, "", 1)
     if err != nil { return -1, -1, err }
